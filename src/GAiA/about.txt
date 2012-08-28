@@ -1,0 +1,17 @@
+
+(C)  1996/2014, Niels Thomas Haugård, uni-c.dk and i2.dk
+
+This version is 1.0 and has been tested and runs on GAiA  release
+R76, R77.10, R77.20 and R77.30  and should  work on all later R77
+versions.
+
+UNIha is short for UNI-C simple high availability for Check Point
+firewall-1. The first version was written in 1996 for  HP-UX  and
+Solaris long before Check Point or other came with a working high
+availability solution.
+
+The original  version  was made by Niels Thomas Haugård and Kjeld 
+Knudsen, UNI-C, later work contributed by Søren Hornstrup.
+
+Current version is by Niels Thomas Haugård
+

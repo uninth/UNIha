@@ -1,0 +1,19 @@
+
+A word of warning:
+
+Ken Thompson has an automobile which he helped design.
+Unlike most automobiles,  it has neither  speedometer,
+nor gas gauge,  nor any of the  numerous  idiot light-
+swhich plague the modern driver.
+
+Rather,  if the driver  makes  any mistake, agiant "?"
+lights up in the center of the dashboard. 
+
+The experienced driver,  he says,  will  usually  know
+what's wrong.
+
+You are root on a system designed by Ken Thompson and
+you are on your own.
+
+Exit with ctrl-d or exit
+

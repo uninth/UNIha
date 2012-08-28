@@ -1,0 +1,289 @@
+#!/var/opt/UNItools/bin/bash
+#
+# This script is the loginshell for the user reconfig
+#
+
+#
+# Executables and other stuff
+#
+dialog=/var/opt/UNItools/bin/dialog
+
+MYDIR=/home/UNIha
+BASENAME=reconfig_menu
+
+MY_LOGFILE=${MYDIR}/log/${BASENAME}.log
+
+uniha=${MYDIR}/bin/UNIha
+about_uniha=${MYDIR}/docs/about.txt
+contact_information=${MYDIR}/docs/contact_information.txt
+bash_warning=${MYDIR}/docs/unix_design.txt
+
+uniha_config=${MYDIR}/etc/UNIha.SH
+dialog_background_title='i2 Simple High Availability system for FireWall-1'
+print_debug=""
+tempfile=${MYDIR}/tmp/reconfig_menu_$$
+
+SPINNING_WHEEL="`tput cup 2 2` `tput blink`working ... `tput sgr0`"
+
+
+function logit() {
+# purpose     : Timestamp output
+# arguments   : Line og stream
+# return value: None
+# see also    : Take care NOT to pass an empty string to logit!
+	LOGIT_NOW="`/bin/date '+%H:%M:%S (%d/%m)'`"
+	STRING="$*"
+
+	if [ -n "${STRING}" ]; then
+		$echo "${LOGIT_NOW} ${STRING}" >> ${MY_LOGFILE}
+		if [ "${VERBOSE}" = "TRUE" ]; then
+			$echo "${LOGIT_NOW} ${STRING}"
+		fi
+	else
+		while read LINE
+		do
+			if [ -n "${LINE}" ]; then
+				$echo "${LOGIT_NOW} ${LINE}" >> ${MY_LOGFILE}
+				if [ "${VERBOSE}" = "TRUE" ]; then
+					$echo "${LOGIT_NOW} ${LINE}"
+				fi
+			else
+				$echo "" >> ${MY_LOGFILE}
+			fi
+		done
+	fi
+}
+
+################################################################################
+# Main
+################################################################################
+
+echo=/bin/echo
+case ${N}$C in
+	"") if $echo "\c" | grep c >/dev/null 2>&1; then
+		N='-n'
+	else
+		C='\c'
+	fi ;;
+esac
+
+logit "User '$LOGNAME' starting $BASENAME"
+
+#
+# Read cofig (link interface)
+#
+. ${uniha_config} || exit -1
+
+trap "rm -f $tempfile; exit 1" 0 1 2 5 15
+#
+# Loop: 1 main menu with are-you-sure dialog and status windows
+#
+while :;
+do
+	clear
+
+	echo ${SPINNING_WHEEL}
+	#
+	# The role for the localhost may have changed
+	#
+	ROLE=`${MYDIR}/bin/UNIha role | sed 's/localhost is //'`
+	ROLE=${ROLE:="[software not initialized]"}
+
+	#
+	# Main dialog
+	#
+	$dialog --clear --help-button --help-label Advanced --ok-label Ok --item-help --title "Main menu - $ROLE firewall" \
+		--cancel-label 'Exit' \
+		--backtitle "${dialog_background_title}"	\
+			--menu "You are connected to the $ROLE firewall.\nScroll down and select an item from the menu below.\n\
+	  " 20 72 10 \
+		"UNIha status"					"Display status for active and passive" ""\
+		"Active"						"Make this the active firewall" ""\
+		"Passive"						"Make this the passive firewall" ""\
+		"Switch roles"					"Switch roles on the two firewalls" ""\
+		"Change password"				"New password for the user reconfig" ""\
+		"Update Time (passive only)"	"Set time on passive from active" ""\
+		"Copy active to passive"		"Backup active and restore on passive" ""\
+		"Power off"						"Shutdown and power the system off" "" \
+		"Reboot"						"Reboot the system" "" \
+		"Contact Information"			"Print phonenumber to i2" ""\
+		"About UNIha"					"History" ""\
+		"Run clish"					"No warning on serious system harm" ""  \
+		"Run /bin/bash"					"Experts only - no warnings at all" ""  \
+		2> $tempfile
+
+	retval=$?
+
+	#
+	# Default values for other dialog's
+	#
+	dialog_OPTIONS="--clear --exit-label ok --textbox  "
+
+	#
+	# Do something based on Main dialog
+	#
+	logit "role: $ROLE: retval=$retval choice=$choice"
+
+	choice=`cat $tempfile`
+	case $retval in
+	  0)	 case $choice in
+				"UNIha status")	clear; echo ${SPINNING_WHEEL}; $uniha $VERBOSE stat >$tempfile;
+					$dialog  --backtitle "${dialog_background_title}" --title "UNIha System Status" ${dialog_OPTIONS} "$tempfile" 24 72
+					/bin/rm -f $tempfile
+				;;
+				"Active")
+					$dialog --backtitle "${dialog_background_title}" --title "warning" --clear \
+					--yesno "\n\nCurrent role is $ROLE\nPress YES to switch to active\nPress NO to avoid changes\nThe switch from $ROLE to active locked may take 1-3 minutes." 15 61
+					case $? in
+						0)	clear ; echo ${SPINNING_WHEEL}; ( $uniha $VERBOSE set active 2>&1 ) |tee $tempfile;
+							$dialog --backtitle "${dialog_background_title}" --title "UNIha lock status for localhost:" ${dialog_OPTIONS} "$tempfile" 24 72
+							/bin/rm -f $tempfile
+							;;
+						*) 	: ;;	# 1) no 255) ESC
+					esac
+				;;
+				"Passive")
+					$dialog --backtitle "${dialog_background_title}" --title "warning" --clear \
+					--yesno "\n\nCurrent role is $ROLE\nPress YES to switch to passive\nPress NO to avoid changes\nThe switch from $ROLE to passive may take 1-3 minutes." 15 61
+					case $? in
+						0)	clear ; echo ${SPINNING_WHEEL}; ( $uniha $VERBOSE set passive 2>&1 ) |tee $tempfile;
+							$dialog --backtitle "${dialog_background_title}" --title "UNIha lock status for localhost:" ${dialog_OPTIONS} "$tempfile" 24 72
+							/bin/rm -f $tempfile
+							;;
+						*) 	: ;;	# 1) no 255) ESC
+					esac
+				;;
+				"Switch roles")
+					$dialog --backtitle "${dialog_background_title}" --title "warning" --clear \
+					--yesno "\n\nCurrent role is $ROLE\nPress YES switch roles between the two firewalls\n\nRemember to switch kables\n\nThe role switch may take 1-3 minutes." 15 61
+					case $? in
+						0)	clear ; echo ${SPINNING_WHEEL}; ( $uniha $VERBOSE switch 2>&1 ) |tee $tempfile;
+							$dialog --backtitle "${dialog_background_title}" --title "UNIha lock status for localhost:" ${dialog_OPTIONS} "$tempfile" 24 72
+							/bin/rm -f $tempfile
+							;;
+						*) 	: ;;	# 1) no 255) ESC
+					esac
+				;;
+				"Change password")
+					case $ROLE in
+						*active*)	clear; echo ""; echo "";#  /usr/bin/passwd reconfig
+									clish -sc "set user reconfig password"
+									echo "press <RETURN>"; read OK
+						;;
+						*)	cat << EOF > $tempfile
+The password for the user 'recofig'
+should only be changed on the active firewall.
+You are connected to the $ROLE firewall.
+EOF
+							$dialog --backtitle "${dialog_background_title}" --title "Sorry:" ${dialog_OPTIONS} "$tempfile" 10 72
+						;;
+					esac
+				;;
+				"Contact Information")
+					$dialog --backtitle "${dialog_background_title}" --title "About UNIha" ${dialog_OPTIONS} "$contact_information" 22 72
+				;;
+				"Update Time (passive only)")
+					echo ${SPINNING_WHEEL}; $uniha $VERBOSE settime >$tempfile;
+					$dialog --backtitle "${dialog_background_title}" --title "Time updated" ${dialog_OPTIONS} "$tempfile" 10 72
+					/bin/rm -f $tempfile
+				;;
+				"Copy active to passive")
+					case $ROLE in
+						*passive*)	
+							$dialog --backtitle "${dialog_background_title}" --title "warning" --clear \
+							--yesno "\n\nThis may take 5-15 min. There will be no activity on the screen unless you have specified VERBOSE on the advanced screen.\n\nSelect <yes> to backup and restore, <no> to abort." 15 61
+							case $? in
+								0)	clear; echo ${SPINNING_WHEEL}; ( $uniha $VERBOSE update force) 2>&1 >$tempfile;
+									$dialog --backtitle "${dialog_background_title}" --title "UNIha update status:" ${dialog_OPTIONS} "$tempfile" 22 72
+									/bin/rm -f $tempfile
+									;;
+								*) 	: ;;	# 1) no 255) ESC
+							esac
+						;;
+						*active*)	cat << EOF > $tempfile
+Backup of the active and restore on the passive must
+start from the passive firewall.
+
+You are connected to the $ROLE firewall.
+
+The passive firewall checks for changes in the
+object database on the active firewall 4 times
+an hour. Other changes may not be detected.
+
+EOF
+							$dialog --backtitle "${dialog_background_title}" --title "Sorry:" ${dialog_OPTIONS} "$tempfile" 22 72
+						;;
+					esac
+				;;
+
+				"Power off")
+					$dialog --backtitle "${dialog_background_title}" --title "warning" --clear \
+					--yesno "\n\nThis will power off the system." 15 61
+					case $? in
+						0)	clear ; echo "shutdown in progress ... "
+							/bin/rm -f $tempfile
+							/sbin/poweroff
+							;;
+						*) 	: ;;	# 1) no 255) ESC
+					esac
+				;;
+				"Reboot")
+					$dialog --backtitle "${dialog_background_title}" --title "warning" --clear \
+					--yesno "\n\nThis will reboot the system.\nThe reboot may take 2-5 min." 15 61
+					case $? in
+						0)	clear ; echo "reboot in progress ... "
+							/bin/rm -f $tempfile
+							/sbin/reboot
+							;;
+						*) 	: ;;	# 1) no 255) ESC
+					esac
+				;;
+
+
+				"Run /bin/bash")
+					$dialog --backtitle "${dialog_background_title}" --title "About UNIha" ${dialog_OPTIONS} "$bash_warning" 22 72
+					su - admin
+
+				;;
+
+				"Run clish")
+					$dialog --backtitle "${dialog_background_title}" --title "About UNIha" ${dialog_OPTIONS} "$bash_warning" 22 72
+					/bin/clish
+				;;
+
+
+				"About UNIha")
+					$dialog --backtitle "${dialog_background_title}" --title "About UNIha" ${dialog_OPTIONS} "$about_uniha" 22 72
+				;;
+			esac
+		;;
+	  1)
+		echo "goodbye for now"; sleep 2
+		break
+		;;
+	  2)
+		$dialog --backtitle "${dialog_background_title}" --title "Advanced" --clear \
+		--yesno "\n\nDisplay debug information (this session only) ?" 15 61
+		case $? in
+			0)	VERBOSE=-v
+				;;
+			1)
+				VERBOSE=""
+				;;
+			255)
+				echo "ESC pressed."
+				;;
+		esac
+		;;
+	  255)
+		echo "ESC pressed."
+		;;
+	  *)
+		echo "Unexpected code $retval"
+		;;
+	esac
+done
+
+logit "normal exit"
+
+exit 0

@@ -1,0 +1,286 @@
+<!doctype html public "-//W3C//DTD HTML 4.0 Transitional //EN">
+<html>
+<head>
+  <meta name="GENERATOR" content="mkd2html 2.1.8 DL=DISCOUNT">
+  <meta http-equiv="Content-Type"
+        content="text/html; charset=utf-8">  <link rel="stylesheet"
+        type="text/css"
+        href="assets/CSS/i2-Book.css" />
+</head>
+<body>
+<h1>Introduction</h1>
+
+<p><strong>UNIha</strong> is a simple high availability solution for Check Point
+firewall-1. This version is compatible with GAiA and has been tested on
+R77.10, R77.20 and R77.30, and should work with all later R77.x versions.</p>
+
+<p>The setup requires two identical hosts connected by a patch cable. One host is
+configured as the active firewall while the other is configured as a passive
+standby host (passive firewall).</p>
+
+<p>There is only one active firewall at a time.</p>
+
+<p>The passive firewall checks the active for configuration changes. Switching
+firewall is done by moving cables and operating the terminal user interface.</p>
+
+<p><img src="assets/img/active-passive.png" alt="active / passive firewall" /></p>
+
+<p><strong>UNIha</strong> does not detect failures on the active firewall. It does not do load
+share and does not change role based on link. The role (active or passive) is
+persistent and survives reboot.
+Check Point offers both high availability and load share solutions; compared to
+<strong>UNIha</strong> they are costly and more complex to configure, but offers zero
+downtime and no connection loss a node in the cluster fails.</p>
+
+<p><strong>UNIha</strong> is licensed as described in LICENCE (BSD license) but requires a
+valid support contract with <a href="http://www.checkpoint.com">Check Point Technologies</a>.
+<strong>UNIha</strong> is installed as an
+<a href="http://en.wikipedia.org/wiki/RPM_Package_Manager">rpm package</a>.</p>
+
+<h1>How does UNIha work</h1>
+
+<p>The <em>passive</em> firewall checks if the firewall configuration on the <em>active
+firewall</em> has changed each quarter. If the <a href="http://en.wikipedia.org/wiki/Public_key_fingerprint">md5
+fingerprint</a> of the
+<em>object database</em> on the active firewall has changed, the passive firewall
+executes a backup on the active, and restores it on the passive. The restore
+process starts the firewall on the passive and may re-boot the passive as well.</p>
+
+<p>If changes is made to the active firewall which does not change the object
+database (e.g. changes to routing) no automatic update is done. In that case
+you may force an update from the terminal user interface.</p>
+
+<p><strong>UNIha</strong> stops the firewall software on the passive and changes the IP address
+of the link interface shared with the active firewall to match the configuration
+of the passive.</p>
+
+<p>The backup and restore is done with Check Point commands, and the backup
+archive is transferred with <a href="http://en.wikipedia.org/wiki/Secure_Shell">ssh</a>.
+The backup and restore does not disrupt the active firewall.</p>
+
+<p>The backup <em>will fail</em> if an
+<a href="http://www.cisco.com/en/US/docs/ios-xml/ios/qos_nbar/prot_lib/configuration/xe-3s/proto_lib3.pdf">CPMI</a>
+connection is present (GUI running) on the active firewall. In that case the
+passive waits until the CPMI session ends.</p>
+
+<h1>What not to expect from <strong>UNIha</strong></h1>
+
+<p><strong>UNIha</strong> is focused on keeping the active and passive firewall in sync. It does
+not detect errors or faults on the active firewall. It does not change
+configuration on its own initiative. It requires manual intervention. The
+design has focus on stability on the cost of functionality and uptime.</p>
+
+<h1>Using <strong>UNIha</strong></h1>
+
+<p><strong>Reconfiguration</strong> is done using the user <code>reconfig</code>, not the default administrator
+account. The user login shell is a TUI (terminal user interface). The user has
+administrative rights on the firewalls; the TUI is only for convenience. There
+is no default password.</p>
+
+<p>The TUI is a front end to <code>/home/UNIha/bin/UNIha</code>
+which may be called directly by an experienced administrator or a script.
+A short help text is shown when it is called without any arguments.</p>
+
+<h2>Available commands</h2>
+
+<p>The <a href="http://en.wikipedia.org/wiki/Text-based_user_interface"><em>Terminal User Interface</em></a>
+enables reconfiguration, role change, shutdown etc. and changing password for
+the user <code>reconfig</code>.</p>
+
+<p>Please notice that the <em>the password must be changed on both
+the active and the passive firewall</em>.</p>
+
+<p><img src="assets/img/uniha-screen-01.png" alt="TUI" /></p>
+
+<h2>Changing password</h2>
+
+<p>The password for the user <code>reconfig</code> may be set by the administrator using
+the command</p>
+
+<pre><code> clish -sc "set user reconfig password"
+</code></pre>
+
+<p>or set using the TUI with the command</p>
+
+<pre><code> su - reconfig
+</code></pre>
+
+<p>selecting <em>change password</em> and following the on screen instructions.<br/>
+Remember to do so on both the <strong>active</strong> and <strong>passive</strong> firewall.</p>
+
+<p>Some commands may take longer than other to execute. A list of commands
+is shown here:</p>
+
+<table>
+<thead>
+<tr>
+<th> Menu </th>
+<th> Description </th>
+<th> Warning </th>
+<th> Time </th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td> UNIha status </td>
+<td> Display status for active and passive </td>
+<td> no </td>
+<td> short </td>
+</tr>
+<tr>
+<td> Active </td>
+<td> Make this the active firewall </td>
+<td> yes </td>
+<td> long </td>
+</tr>
+<tr>
+<td> Passive </td>
+<td> Make this the passive firewall </td>
+<td> yes </td>
+<td> short </td>
+</tr>
+<tr>
+<td> Switch roles </td>
+<td> Switch roles on the two firewalls </td>
+<td> yes </td>
+<td> long </td>
+</tr>
+<tr>
+<td> Change password </td>
+<td> New password for the user reconfig </td>
+<td> no </td>
+<td> short </td>
+</tr>
+<tr>
+<td> Update Time (passive only) </td>
+<td> Set time on passive from active </td>
+<td> no </td>
+<td> short </td>
+</tr>
+<tr>
+<td> Copy active to passive </td>
+<td> Backup active and restore on passive </td>
+<td> yes </td>
+<td> Very long </td>
+</tr>
+<tr>
+<td> Power off </td>
+<td> Shutdown and power the system off </td>
+<td> yes </td>
+<td> short </td>
+</tr>
+<tr>
+<td> Reboot </td>
+<td> Reboot the system </td>
+<td> yes </td>
+<td> long </td>
+</tr>
+<tr>
+<td> Contact Information </td>
+<td> Print phonenumber to UNI-C </td>
+<td> no </td>
+<td> short </td>
+</tr>
+<tr>
+<td> About UNIha </td>
+<td> History </td>
+<td> no </td>
+<td> short </td>
+</tr>
+<tr>
+<td> Run clish </td>
+<td> Execute clish (See Check Point documentation) </td>
+<td> no </td>
+<td> n/a </td>
+</tr>
+<tr>
+<td> Run /bin/bash </td>
+<td> Execute login shell </td>
+<td> no </td>
+<td> n/a </td>
+</tr>
+</tbody>
+</table>
+
+
+<h1>Cables</h1>
+
+<p>Operations which changes the status of the two hosts may require changing
+cables. Change the cables one at a time in any order before or after the
+change.</p>
+
+<h1>How to solve known problems</h1>
+
+<p>SSH is pesky; the start-up script generates keys if they are not present. If
+the start-up scripts runs during restore, new keys will be created which will
+lead to problems with the ssh client complaining about changed keys. A restore
+will fix that.</p>
+
+<p>Running <code>clish</code> or <code>/bin/bash</code> may be required to solve some problems but is
+generally not encouraged.</p>
+
+<p>Contact information:</p>
+
+<table>
+<thead>
+<tr>
+<th> Contact </th>
+<th> Information </th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td> Name </td>
+<td> Contact name </td>
+</tr>
+<tr>
+<td> Direct phone </td>
+<td> +45 12 34 56 78 </td>
+</tr>
+<tr>
+<td> Main phone </td>
+<td> +45 12 34 56 78 </td>
+</tr>
+<tr>
+<td> e-mail </td>
+<td> contact@email.tld</td>
+</tr>
+<tr>
+<td> Address </td>
+<td> Address here </td>
+</tr>
+<tr>
+<td> EAN </td>
+<td> REAL EAN </td>
+</tr>
+<tr>
+<td> CVR </td>
+<td> REAL CVR </td>
+</tr>
+</tbody>
+</table>
+
+
+<p>Writing down passwords is <strong>insecure</strong> but convenient. If you do so, then keep it safe.</p>
+
+<table>
+<thead>
+<tr>
+<th> Var </th>
+<th> value </th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td> Login user name </td>
+<td> <code>reconfig</code> </td>
+</tr>
+<tr>
+<td> Password </td>
+<td> &hellip;&hellip;&hellip;&hellip;&hellip;&hellip;&hellip;&hellip;&hellip;&hellip;&hellip;&hellip;&hellip;&hellip;&hellip;&hellip;&hellip;&hellip;&hellip;&hellip;. </td>
+</tr>
+</tbody>
+</table>
+
+</body>
+</html>

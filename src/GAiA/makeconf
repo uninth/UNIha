@@ -1,0 +1,273 @@
+#!/bin/bash
+#
+# $HOME/.ssh/config
+# /etc/hosts
+# ${CONFFILE}
+# $HOME/.ssh/authorized_keys
+# 
+# And install the following files in
+# 	/etc/cron.d/UNIha_prob
+# 	/etc/cron.d/UNIha_update
+# 	/etc/cron.d/UNIha_settime
+
+
+# skal skrives om: 
+# - benyt /etc/cron.d/UNIha_check
+# - ingen useradd
+
+UNIHADIR="/home/UNIha"
+CONFFILE="${UNIHADIR}/etc/UNIha.SH"
+
+function print_info() {
+clear
+	cat << EOF
+0 Make two identical check point firewalls with all UNItools and
+  UNIha installed
+
+1 Run this command on the active only.
+
+2 On the passive firewall do
+    cpstop
+    /sbin/ifconfig interface cidr/len
+
+  where interface is the sync interface and cidr/len is the IP
+  address for the passive host on the sync network.
+
+3 Select an interface from the list below, VLAN not allowed. If
+  your LAN does not show up it may bechause it is unconfigured.
+
+EOF
+}
+
+choice_of()
+{
+    select CHOICE
+    do
+        break
+    done
+}
+
+my_read () {
+  #  Called with my_read varname 'text string',
+  #  outputs the previous value between brackets as the default value,
+  # then asks for a new value.
+
+  local local_var
+  all_but_first=`$echo $* | sed -e 's/\w*\ //'`
+
+  $echo $N "$all_but_first $C"
+  eval '$echo $N "[$'$1'] "'  #  Previous value.
+# eval echo -n "[\$$1] "      #  Easier to understand, but loses trailing space in user prompt.
+  read local_var
+  [ -n "$local_var" ] && eval $1=\$local_var
+
+  # "And-list": if "local_var" then set "$1" to its value.
+}
+
+function ack_input() {
+	local my_inp=""
+	while true
+	do
+		if [ -n "$*" ]
+		then
+			$echo "$@"
+		fi
+		$echo $N "Is this correct? [Y/n] $C"
+
+		read "my_inp"
+		if [ -z "$my_inp" -o "Y" == "$my_inp" -o "y" == "$my_inp" ] ; then return 0 ; fi
+		if [ "N" == "$my_inp" -o "n" == "$my_inp" ] ; then return 1 ; fi
+	done
+
+}
+
+############################################################
+#
+# Main
+#
+############################################################
+
+echo=/bin/echo
+case ${N}$C in
+        "") if $echo "\c" | grep c >/dev/null 2>&1; then
+                N='-n'
+        else
+                C='\c'
+        fi ;;
+esac
+
+if [ -f "${CONFFILE}" ] ; then
+	source "${CONFFILE}"	&& echo "read config from ${CONFFILE}"
+else
+	echo "no existing config file found"
+	INETIF=`netstat -rn |sed '/^0.0.0.0/!d; s/.* //'`	# wild guess
+fi
+
+ALL_IFS=`/sbin/ifconfig -a| sed '/Link encap:Ethernet/!d; s/[ ].*//; s/\..*//' | sed '$!N; /^\(.*\)\n\1$/!P; D'`
+
+print_info
+
+while true
+do
+	/var/opt/UNItools/bin/interface_status|sed '/^[	 ]*eth[0-9]*\.[0-9]*/d'
+
+	#choice_of $ALL_IFS
+
+	my_read INETIF "Internet interface name: " 
+	my_read COMIF  "Interface for internal communication: "
+
+	FWCOMIP=`ifconfig $COMIF  | sed '/inet addr:/!d; s/.*addr://;' | awk '{ print $1 }'`
+	ACTIVECOMIP=`ifconfig $COMIF | sed '/inet addr:/!d; s/.*addr://;' | awk '{ print $1 }'`
+	STANDBYCOMIP=`echo $ACTIVECOMIP | awk -F'.' '{ print $1 "." $2 "." $3 "." $4 + 1 }'`
+	COMNETMASK=`ifconfig $COMIF | sed '/inet addr:/!d; s/.*Mask://'`
+
+	my_read FWCOMIP "IP address for the active firewall on interface ${COMIF}: "
+	my_read STANDBYCOMIP "Active firewall ${COMIF}: $ACTIVECOMIP => passive: " 
+	my_read COMNETMASK "Netmask on interface ${COMIF}: " 
+
+	echo INETIF=$INETIF
+	echo COMIF=$COMIF
+	echo FWCOMIP=$FWCOMIP
+	echo STANDBYCOMIP=$STANDBYCOMIP
+	echo COMNETMASK=$COMNETMASK
+	if ack_input ; then break ; fi
+done
+
+cat <<-EOF > "${CONFFILE}"
+:
+# Warning: This file will be sourced by a bash script and must complie with bash syntax
+
+INETIF="${INETIF}"		# Name of internet interface / link interface
+COMIF="${COMIF}"		# Name of interface between active and passive firewall
+FWCOMIP="${FWCOMIP}"		# Active firewall ip address on COMIF
+STANDBYCOMIP="${STANDBYCOMIP}"	# Passive firewall ip address on COMIF
+COMNETMASK="${COMNETMASK}"	# Netmask on COMIF
+
+function site_post_f_set_role_to_active() {
+	#
+	# This will be done after reconfiguration
+	#
+	/etc/init.d/dhcpd	restart
+	/etc/init.d/dhcrelay	restart
+}
+
+function site_post_f_set_role_to_passive() {
+	#
+	# This will be done after reconfiguration
+	#
+	/etc/init.d/dhcpd	restart
+	/etc/init.d/dhcrelay	restart
+}
+
+EOF
+echo "made ${CONFFILE}"
+
+cat << EOF > /tmp/UNIha.clish
+delete host name active ipv4
+delete host name passive ipv4
+add host name active ipv4-address ${FWCOMIP}
+add host name passive ipv4-address ${STANDBYCOMIP}
+EOF
+
+D=`domainname`
+if [ -n "$D" ]; then
+
+cat << EOF >> /tmp/UNIha.clish
+delete host name active.$D ipv4
+delete host name passive.$D ipv4
+add host name active.$D ipv4-address ${FWCOMIP}
+add host name passive.$D ipv4-address ${STANDBYCOMIP}
+EOF
+fi
+
+clish -s -i -f /tmp/UNIha.clish
+
+echo "added active and passive to /etc/hosts on active"
+
+#/bin/rm -f /tmp/UNIha.clish
+
+#
+# ssh config - change ADMIN, copy to RECONFIG
+#
+cat << EOF > /home/admin/.ssh/config
+Host	${FWCOMIP} ${STANDBYCOMIP} active a passive p
+User	admin
+Port	22
+EOF
+
+# ssh: config and known_hosts
+#
+# 1 add myself to authorized_keys
+# 2 create config
+# 3 modify known_hosts
+
+grep -q "`cat /home/admin/.ssh/id_dsa.pub `" /home/admin/.ssh/authorized_keys
+case $? in
+	0)	echo "my id_dsa.pub found in my authorized_keys"
+	;;
+	*)	cat /home/admin/.ssh/id_dsa.pub>> /home/admin/.ssh/authorized_keys
+		echo "added my id_dsa.pub to authorized_keys"
+	;;
+esac
+
+ssh-keygen -f /home/admin/.ssh/known_hosts -R passive
+ssh-keygen -f /home/admin/.ssh/known_hosts -R active
+
+chmod 600 /home/admin/.ssh/*
+chmod 500 /home/admin/.ssh/
+
+scp -r /home/admin/.ssh/* passive:/home/admin/.ssh/
+
+/bin/cp -p /home/admin/.ssh/* /home/UNIha/.ssh/
+
+scp -r /home/UNIha/.ssh/* passive:/home/UNIha/.ssh/
+
+echo testing connectivity by transfering $CONFFILE to passive AND to active ...
+cp $CONFFILE /tmp
+scp /tmp/UNIha.SH passive:$CONFFILE
+scp /tmp/UNIha.SH active:$CONFFILE
+
+echo "*/1  * * * * root /home/UNIha/bin/UNIha prob		>/dev/null 2>&1" > /etc/cron.d/UNIha_prob
+echo "*/15 * * * * root /home/UNIha/bin/UNIha update	>/dev/null 2>&1" > /etc/cron.d/UNIha_update
+echo "* 6,12 * * * root /home/UNIha/bin/UNIha settime	>/dev/null 2>&1" > /etc/cron.d/UNIha_settime
+
+chmod 640 /etc/cron.d/UNIha*
+chown admin:root /etc/cron.d/UNIha*
+
+echo "installed `echo /etc/cron.d/UNIha*`"
+echo "restarting crond ... "
+/etc/init.d/crond restart
+
+#
+# Setup the passive 
+#
+
+scp  /etc/cron.d/UNIha* passive:/etc/cron.d/
+ssh passive "chmod 640 /etc/cron.d/UNIha*"
+ssh passive "chown admin:root /etc/cron.d/UNIha*"
+
+echo "installed `echo /etc/cron.d/UNIha*`"
+echo "restarting crond on passive ... "
+ssh passive /etc/init.d/crond restart
+
+clish -s -i -f /tmp/UNIha.clish
+
+echo "added active and passive to /etc/hosts on active"
+
+scp /tmp/UNIha.clish passive:/tmp
+
+echo "clish -s -i -f /tmp/UNIha.clish" | ssh passive
+
+#
+# Lock the passive
+#
+ssh passive "/home/UNIha/bin/UNIha set passive locked"
+
+rsync -avzH --rsync-path=/var/opt/UNItools/bin/rsync /home/UNIha/ passive:/home/UNIha
+
+#
+# and update it
+#
+ssh passive '/home/UNIha/bin/UNIha -v update'
+
+exit 0

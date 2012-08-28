@@ -1,0 +1,905 @@
+#!/bin/bash
+#
+#--------------------------------------------------------------------------------------#
+# TODO
+#	check restore successful
+#
+#	- restore leaves a tmp/ dir in /home/UNIha/bin - should be fixed
+#	- delete the logfile when no error: save the logfile as logfile.errors in case of
+#	  error(s).
+#	- update: count hours of failed updates. kill any cpmi if hour past 03 am and 
+#	  update has failed more than 32 times (8 hours)
+#
+#	- prob should go away it is not safe
+#	- replace with switch, which reconfigures both firewall(s)
+#
+#--------------------------------------------------------------------------------------#
+
+#
+# Vars
+#
+MYDIR=/home/UNIha
+MYNAME=`basename $0`
+MY_LOGFILE=${MYDIR}/log/${MYNAME}.log
+TMPFILE=${MYDIR}/tmp/${MYNAME}.tmp
+RECONFIG_IN_PROGRESS="/tmp/UNIha.reconfig.if.progress"		# reconfig if progress
+SYNCLOCKFILE=${MYDIR}/tmp/${MYNAME}.sync_in_progress		# pid|%s time|status msg
+ROLE_LOCK_FILE=${MYDIR}/tmp/${MYNAME}.my_role				# role should survive reboot
+ROLE_LOCK_FILE=/var/log/${MYNAME}.my_role				# role should survive reboot
+TEST_ROLE_AFTER_BOOT=/tmp/UNIha_role_tested_after_boot		# NO .file !
+
+SWITCH_REQUEST_FILE=${MYDIR}/tmp/${MYNAME}.switch_request	# remote requests to switch roles
+
+# DATE_S=`/bin/date +%s`										# seconds since epoch
+# DATE_H=`/bin/date '+%H:%M:%S (%d/%m)'`						# human readable date format
+
+ifconfig=/sbin/ifconfig
+
+#BACKUPFILE=/var/CPbackup/backups/firewall_backup_archive.tgz			# name will be re-used - which will prevent FS running full of archives
+BACKUPFILE=active_firewall_backup_archive.tgz					# name will be re-used - which will prevent FS running full of archives
+
+MY_CONFIG=${MYDIR}/etc/${MYNAME}.SH
+VERBOSE=FALSE
+
+SSH_PORT=22
+SSH_ARGS="-q -o BatchMode=no -o FallBackToRsh=no -o ConnectionAttempts=2 -o ForwardX11=no -o StrictHostKeyChecking=no -o Port=${SSH_PORT}"
+SSH_VERBOSE=""
+
+FWVERSION=""
+CPVERSION=""
+HFANUM=""
+LOCAL_VERSION=""
+RULEBASE=""
+
+ethwireck=${MYDIR}/bin/ethwireck						# -1: error 0: up 1: down 2: driver cannot tell
+
+#
+# Functions
+#
+function f_settime() {
+	f_local_is_active
+	if [ $? -eq 1 ]; then
+		logit "will not set time on active localhost"
+		echo "localhost is active, settime only works on passive bye"
+		exit -1
+	else
+		logit "current time is `/bin/date +%T` updating time from active ..."
+		/bin/date +%T --set "`ssh ${SSH_ARGS} $FWCOMIP /bin/date +%T`" >/dev/null
+		logit "current time is `/bin/date +%T`"
+	fi
+
+}
+
+function f_readconfig() {
+	if [ -f "${MY_CONFIG}" ]; then
+		source ${MY_CONFIG}
+		#
+		# Test it
+		#
+		logit "sourced ${MY_CONFIG}"
+		logit "INETIF=$INETIF"
+		logit "COMIF=$COMIF"
+		logit "FWCOMIP=$FWCOMIP"
+		logit "STANDBYCOMIP=$STANDBYCOMIP"
+		logit "COMNETMASK=$COMNETMASK"
+
+	else
+		logit "${MY_CONFIG}: not found, bye"
+		return 1
+	fi
+	return 0
+	:
+}
+
+function	f_get_info_for_host() {
+	#
+	# TODO: check for $SYNCLOCKFILE
+	#		pid|%s time|status msg
+	#
+	# arg1: hostname
+	# filter FWVERSION -> LOCAL_FWVERSION
+	#
+
+	cat << 'EOF' | sed "s%_INETIF_%${INETIF}%g;" | ssh ${SSH_ARGS} $1 2>/dev/null
+	HOST_FWVERSION=`$CPDIR/bin/cpprod_util CPPROD_GetCurrentVersion FW1 | sed "s/ //g"`
+	# HOST_CPVERSION=`$CPDIR/bin/cpprod_util CPPROD_GetValue "FW1//$curVer" CurrentLabel 1`
+	HOST_CPVERSION=`$FWDIR/bin/fw ver -k|awk '$1 == "kernel:" { print $2; next; }; { next; }'`
+	HOST_HFANUM=`$CPDIR/bin/cpprod_util CPPROD_GetValue "FW1//$curVer//HotFixes//LastInfo" LastHFAIndex 1`
+	HOST_RULEBASE=`$FWDIR/bin/fw stat|awk '$1 == "HOST" { next }; { print $2 }'`
+	HOST_RULEBASE_INSTALLED_ON=`fw stat |awk '$1 == "HOST" { next }; { print $3 " " $4 }'`
+	HOST_LINK_STATUS=`ethtool _INETIF_ | sed '/Link/!d; s/.*://; s/ *//'`
+	HOST_NUMBER_IFS_UP=`/sbin/ifconfig -a|sed '/[         ]*UP/!d; /LOOPBACK/d' | sed -n '$='`
+	HOST_CHKSUM=`md5sum $FWDIR/conf/objects.C | awk '{ print $1 }'`
+	HOST_LAST_CHANGE=`stat --format=%y $FWDIR/conf/objects.C`
+
+	echo HOST_FWVERSION=\"$HOST_FWVERSION\"
+	echo HOST_CPVERSION=\"$HOST_CPVERSION\"
+	echo HOST_HFANUM=\"$HOST_HFANUM\"
+	echo HOST_RULEBASE=\"$HOST_RULEBASE\"
+	echo HOST_RULEBASE_INSTALLED_ON=\"$HOST_RULEBASE_INSTALLED_ON\"
+	echo HOST_LINK_STATUS=\"$HOST_LINK_STATUS\"
+	echo HOST_NUMBER_IFS_UP=\"$HOST_NUMBER_IFS_UP\"
+	echo HOST_CHKSUM=\"$HOST_CHKSUM\"
+	echo HOST_LAST_CHANGE=\"$HOST_LAST_CHANGE\"
+EOF
+
+}
+
+function f_local_is_active() {
+# check this host is the active firewall ? true : false
+# 
+	LOCAL_RULEBASE=`$FWDIR/bin/fw stat|awk '$1 == "HOST" { next }; { print $2 }'`
+	LOCAL_RULEBASE_INSTALLED_ON=`fw stat |awk '$1 == "HOST" { next }; { print $3 " " $4 }'`
+	LOCAL_LINK_STATUS=`ethtool ${INETIF} | sed '/Link/!d; s/.*://; s/ *//'`
+	LOCAL_NUMBER_IFS_UP=`$ifconfig -a|sed '/[	 ]*UP/!d; /LOOPBACK/d' | sed -n '$='`
+
+	LOCAL_FWCOMIP=`$ifconfig ${COMIF} |sed '/inet6/d; /inet/!d; s/.*inet addr://; s/ *Bcast:.*//'`
+
+	# logit "output from '$ifconfig ${COMIF} '"
+	# $ifconfig ${COMIF} 2>&1 | logit
+
+	case $LOCAL_FWCOMIP in
+		$FWCOMIP)		return 1
+		;;
+		$STANDBYCOMIP)	return 0
+		;;
+		*)				f_die 1 "IP on com interface '${COMIF}' is '$LOCAL_FWCOMIP' and does not match FWCOMIP  $FWCOMIP or STANDBYIP $STANDBYCOMIP from configfile"
+		;;
+	esac
+}
+
+function f_get_info() {
+	#
+	# Extract information about who is active / passive: is it localhost or remote
+	# 
+	LOCAL_FWCOMIP=`$ifconfig ${COMIF} |sed '/inet6/d; /inet/!d; s/.*inet addr://; s/ *Bcast:.*//'`
+
+	case $LOCAL_FWCOMIP in
+		$FWCOMIP)		REMOTE_FWCOMIP=$STANDBYCOMIP
+						LOCAL_ROLE_IS="active"
+						REMOTE_ROLE_IS="passive"
+		;;
+		$STANDBYCOMIP)	REMOTE_FWCOMIP=$FWCOMIP
+						LOCAL_ROLE_IS="passive"
+						REMOTE_ROLE_IS="active"
+		;;
+		*)
+		#
+		# die due to config error
+		#
+
+		logit "output from '$ifconfig ${COMIF}'"
+		$ifconfig ${COMIF} 2>&1  | logit
+		f_die 1 "IP on com interface '${COMIF}' is '$LOCAL_FWCOMIP' and does not match FWCOMIP  $FWCOMIP or STANDBYIP $STANDBYCOMIP from configfile"
+	esac
+
+	logit "reading local firewall version, rulebase name, installation time, linkstatus and sync status"
+	eval `f_get_info_for_host $LOCAL_FWCOMIP | sed 's/^HOST_/LOCAL_/g'`
+
+	logit "local IP is $LOCAL_FWCOMIP"
+	logit "local role is $LOCAL_ROLE_IS based on IP addr"
+	logit "Local firewall version  is $LOCAL_FWVERSION"
+	logit "local cp version is $LOCAL_CPVERSION"
+	logit "local installed hotfix(es): $LOCAL_HFANUM"
+	logit "local firewall rulebase name $LOCAL_RULEBASE"
+	logit "local rule base installed on $LOCAL_RULEBASE_INSTALLED_ON"
+	logit "local link status $LOCAL_LINK_STATUS"
+	logit "local number of active interfaces $LOCAL_NUMBER_IFS_UP"
+	logit "local md5sum on objects.C: $LOCAL_CHKSUM"
+	logit "local last change on objects.C =$LOCAL_LAST_CHANGE"
+
+	logit "check sync status by testing uptime on remote with ssh ... "
+	# sync status
+	STATUS="Unknown"
+	# We just need the exit status for this: 0 is ok everything else is an (major) error
+	# as SSH_ARGS ignores e.g. problems with host keys
+	#
+	ssh-keygen -f "$HOME/.ssh/known_hosts" -R $REMOTE_FWCOMIP	>/dev/null 2>&1
+	ssh-keygen -f "$HOME/.ssh/known_hosts" -R $STANDBYCOMIP		>/dev/null 2>&1
+	ssh-keygen -f "$HOME/.ssh/known_hosts" -R $FWCOMIP		>/dev/null 2>&1
+	ssh-keygen -f "$HOME/.ssh/known_hosts" -R active		>/dev/null 2>&1
+	ssh-keygen -f "$HOME/.ssh/known_hosts" -R passive		>/dev/null 2>&1
+
+	ssh ${SSH_ARGS} $REMOTE_FWCOMIP uptime >/dev/null 2>&1
+	EXIT_STATUS=$?
+	logit "ssh ${SSH_ARGS} $REMOTE_FWCOMIP uptime >/dev/null 2>&1: exit with $EXIT_STATUS"
+
+	#
+	# Full check: ssh from
+	#
+
+	case $EXIT_STATUS in
+		0)	STATUS="ok"
+	#		REMOTE_FWVERSION=`echo '$CPDIR/bin/cpprod_util CPPROD_GetCurrentVersion FW1 | sed "s/ //g"' |
+	#			ssh ${SSH_ARGS} $REMOTE_FWCOMIP 2>/dev/null`
+	#		REMOTE_HFANUM=`echo '$CPDIR/bin/cpprod_util CPPROD_GetValue "FW1//$curVer//HotFixes//LastInfo" LastHFAIndex 1' |
+	#			ssh ${SSH_ARGS} $REMOTE_FWCOMIP 2>/dev/null`
+
+		eval `f_get_info_for_host $REMOTE_FWCOMIP | sed 's/^HOST_/REMOTE_/g'`
+
+		logit "remote IP is '$REMOTE_FWCOMIP'"
+		logit "remote role is '$REMOTE_ROLE_IS based on IP addr'"
+		logit "remote firewall version  is '$REMOTE_FWVERSION'"
+		logit "remote cp version is '$REMOTE_CPVERSION'"
+		logit "remote installed hotfix(es): '$REMOTE_HFANUM'"
+		logit "remote firewall rulebase name '$REMOTE_RULEBASE'"
+		logit "remote rule base installed on '$REMOTE_RULEBASE_INSTALLED_ON'"
+		logit "remote link status '$REMOTE_LINK_STATUS'"
+		logit "remote number of active interfaces '$REMOTE_NUMBER_IFS_UP'"
+		logit "remote md5sum on objects.C: '$REMOTE_CHKSUM'"
+		logit "remote last change on objects.C ='$REMOTE_LAST_CHANGE'"
+
+		;;
+	*)	STATUS="connection failed: $STATUS"
+		logit "$STATUS"
+#		REMOTE_FWVERSION="Unknown"
+		REMOTE_CPVERSION="Unknown"
+#		REMOTE_HFANUM="Unknown"
+		REMOTE_RULEBASE="Unknown"
+		REMOTE_RULEBASE_INSTALLED_ON="Unknown"
+		REMOTE_LAST_CHANGE="Unknown"
+		;;
+	esac
+
+	if [ "${LOCAL_RULEBASE}" = "-" ]; then
+		LOCAL_FWRUNNING="yes"
+	else
+		LOCAL_FWRUNNING="no"
+	fi
+
+	if [ "${REMOTE_RULEBASE}" = "-" ]; then
+		REMOTE_FWRUNNING="no"
+	else
+		REMOTE_FWRUNNING="yes"
+	fi
+
+	if [ "$REMOTE_FWRUNNING" = "no" ]; then
+		REMOTE_ROLE_IS="passive"
+	else
+		if [ "$REMOTE_FWRUNNING" = "yes" ]; then
+			REMOTE_ROLE_IS="active"
+		else
+			REMOTE_ROLE_IS="unknown"
+			logit "remote role is undefined [fw running:$REMOTE_FWRUNNING] && link [$REMOTE_LINK_STATUS]"
+			# ERRORS="undefined [fw running:$REMOTE_FWRUNNING] && link [$REMOTE_LINK_STATUS]"
+		fi
+	fi
+
+	logit "calculating md5 checksum of \$FWDIR/conf/objects.C on active and passive ... "
+	logit "local host:  $LOCAL_CHKSUM - last changed on: $LOCAL_LAST_CHANGE"
+	logit "remote host: $REMOTE_CHKSUM - last changed on: $REMOTE_LAST_CHANGE"
+	if [ "$LOCAL_CHKSUM" = "$REMOTE_CHKSUM" ]; then
+		SYNCSTATUS="ok"
+		logit "md5sum identical - syncstatus is ok"
+	else
+		SYNCSTATUS="not synced"
+		logit "md5sum differ - sync not ok"
+	fi
+	# check om sync er i gang ok|not synced|in progress|failed
+
+	return 0
+}
+
+function f_check() {
+
+	f_get_info
+	case $SYNCSTATUS in
+		"ok")	echo "object databse on active and passive identical"
+		;;
+		*)	echo "objectdatabase differ update required"
+		;;
+	esac
+
+}
+
+function f_update() {
+
+	# pid|%s time|status msg
+	if [ -f "$SYNCLOCKFILE" ]; then
+		logit "lock file '$SYNCLOCKFILE' found"
+		PID=`awk -F'|'	'{ print $1 }' $SYNCLOCKFILE`
+		TIME=`awk -F'|'	'{ print $2 }' $SYNCLOCKFILE`
+		MSG=`awk -F'|'	'{ print $3 }' $SYNCLOCKFILE`
+		OK=`ps h o pid p $PID | grep ${PID} | wc -l | tr -d ' '`
+		case ${OK} in
+			0)		logit "no process found for $PID, [$MSG] removing lock"
+					/bin/rm -f $SYNCLOCKFILE
+			;;
+			*)		f_die 1 "found process for $PID [$MSG] stopping"
+			;;
+		esac
+	fi
+
+	echo "$$|`/bin/date +%s`|starting" > $SYNCLOCKFILE
+	logit "created lock file '$SYNCLOCKFILE'"
+
+	f_local_is_active
+	if [ $? -eq 1 ]; then
+		echo "localhost is active NOT doing update"
+		logit "localhost is active NOT doing update"
+		/bin/rm -f $SYNCLOCKFILE
+		exit
+	else
+		logit "localhost is passive doing update"
+	fi
+
+	f_get_info
+
+	if [ "${SYNCSTATUS}" = "ok" ]; then
+			logit "sync status is $SYNCSTATUS"
+		if [ "$2"  != "force" ]; then
+			/bin/rm -f "$SYNCLOCKFILE"
+			exit 0
+		else
+			logit "forcing backup/restore anyway"
+		fi
+	fi
+
+	logit "sync status is '$SYNCSTATUS' so backup / restore / reconfig is required"
+	#
+	# backup (R65 and R75.x) writes &1 to /tmp/output.txt and &2 to /var/log/CPbackup_err.tx
+	# the exit status is apparently not defined -- and especially not when used in a pipe
+	#
+	echo "$$|`/bin/date +%s`|exec backup on active" > $SYNCLOCKFILE
+
+	#TODO
+	ssh ${SSH_ARGS} $FWCOMIP "echo y | /bin/backup -d --file ${BACKUPFILE}; cat /tmp/output.txt; cat /var/log/CPbackup_err.txt" | logit
+
+	OK=`ssh ${SSH_ARGS} $FWCOMIP "cat /tmp/output.txt" | grep "Backup operation succedded" | wc -l | tr -d ' '`
+	case ${OK} in
+		1)	logit "backup ok"
+		;;
+		*)	logit "backup ended with error(s)"
+			f_die 1 "Backup part of backup / restore failed - please fix, bye"
+		;;
+	esac
+	echo "$$|`/bin/date +%s`|backup done" > $SYNCLOCKFILE
+
+	# Backup is now in /var/log/CPbackup/backups OR in /var/CPbackup/backups
+	BU=$(cat << EOF  | ssh -T active
+
+	if [ -f /var/log/CPbackup/backups/${BACKUPFILE} ]; then
+		echo /var/log/CPbackup/backups/${BACKUPFILE}
+	fi
+	if [ -f /var/CPbackup/backups/${BACKUPFILE} ]; then
+		echo /var/CPbackup/backups/${BACKUPFILE}
+	fi
+
+EOF
+	)
+
+	scp ${SSH_ARGS} $FWCOMIP:${BU} ${BU}
+	case $? in
+		0)	logit "transfer ok"
+		;;
+		*)	f_die 1 "transfer failed - scp exit with '$?'"
+		;;
+	esac
+	echo "$$|`/bin/date +%s`|backup done" > $SYNCLOCKFILE
+
+	ACTIVE_CHKSUM=`ssh ${SSH_ARGS} $FWCOMIP		"md5sum  ${BU} | awk '{ print $1 }'"`
+	PASSIVE_CHKSUM=`ssh ${SSH_ARGS} $STANDBYCOMIP	"md5sum  ${BU} | awk '{ print $1 }'"`
+
+	case $PASSIVE_CHKSUM in
+		"${ACTIVE_CHKSUM}")	logit "active and passive md5sum identical, ok"
+		;;
+							
+		*)		echo "$$|`/bin/date +%s`|transfer failed" > $SYNCLOCKFILE
+				f_die 1 "active and passive md5sum does not match, transfer failed"
+		;;
+	esac
+
+	logit "removing ${BACKUPFILE} on active ... "
+	ssh ${SSH_ARGS} $FWCOMIP "/bin/rm ${BU}"
+	case $? in
+		0)	logit "removal ok"
+		;;
+		*)	f_die 1 "removal of  ${BU} on active failed - ssh exit with '$?'"
+		;;
+	esac
+
+	#
+	# Now for the restore
+	#
+	logit "starting restore .. "
+	logit "starting restore .. "
+	logit "starting restore .. "
+	logit "starting restore .. "
+	logit "starting restore .. "
+	logit "starting restore .. "
+	logit "starting restore .. "
+	(
+		#TODO:
+		cd /tmp
+		clish -s -c "set backup restore local ${BU}"
+		#${echo} c | /bin/restore --file "${BU}" 1>/dev/null 2>&1
+	)
+	logit "restore done - exit status = $?"
+	logit < /tmp/verify_restore.txt
+	logit < /var/log/CPbackup_err.txt
+
+	#
+	# set role to prev role
+	#
+	f_set_role_to passive
+
+	#
+	# rm tmpfiles etc
+	#
+	/bin/rm -f $TMPFILE $SYNCLOCKFILE
+	logit "normal exit"
+
+	exit 0
+
+}
+
+function f_prob() {
+	#
+	# check request for reconfig
+	#
+	if [ ! -f "${SWITCH_REQUEST_FILE}" ]; then
+		if [ $VERBOSE = "TRUE" ]; then
+			logit "switch not requested by remote"
+		fi
+	else
+		if [ $VERBOSE = "TRUE" ]; then
+			logit "switch requested by remote"
+		fi
+		f_do_switch
+	fi
+
+	#
+	# check my role is correct (after re-boot)
+	#
+	SECUNDS_UP=`cat /proc/uptime | sed 's/ .*//; s/\..*//'`
+
+	if [ ${SECUNDS_UP} -lt 200 ]; then
+		logit "only ${SECUNDS_UP} seconds since boot: system may not have finished booting"
+		/bin/rm -f ${TEST_ROLE_AFTER_BOOT}
+		exit 0
+	else
+		if [ -f "${TEST_ROLE_AFTER_BOOT}" ]; then
+			logit "stop file ${TEST_ROLE_AFTER_BOOT} found role test done"
+			# test done on prev. run
+			exit 0
+		else
+			logit "system rebooted ${SECUNDS_UP} sec ago: checking current role matches locked role"
+			f_local_is_active
+			if [ $? -eq 1 ]; then
+				ROLE="active"
+			else
+				ROLE="passive"
+			fi
+
+			if [ -f "${ROLE_LOCK_FILE}" ]; then
+
+				LOCKED_ROLE=`head -1 ${ROLE_LOCK_FILE}`
+				case ${LOCKED_ROLE} in
+					active|passive)
+						if [ "${LOCKED_ROLE}" = "${ROLE}" ]; then
+							logit "locked role '${LOCKED_ROLE}' = '${ROLE}', bye"
+						else
+							f_set_role_to ${LOCKED_ROLE}
+						fi
+					;;
+					*)	logit "error in ${ROLE_LOCK_FILE}: contents is not active or passive but:"
+						cat ${ROLE_LOCK_FILE} | logit
+						# logit "removing file ... "
+						# /bin/rm -f ${ROLE_LOCK_FILE}
+					;;
+				esac
+
+			else
+				logit "no role lock file '${ROLE_LOCK_FILE} which is an error I cannot fix"
+			fi
+		fi
+		echo "seconds after boot: ${SECUNDS_UP} - `uptime`" > ${TEST_ROLE_AFTER_BOOT}
+	fi
+}
+
+function f_switch() {
+
+	LOCAL_FWCOMIP=`$ifconfig ${COMIF} |sed '/inet6/d; /inet/!d; s/.*inet addr://; s/ *Bcast:.*//'`
+
+	case $LOCAL_FWCOMIP in
+		$FWCOMIP)		REMOTE_FWCOMIP=$STANDBYCOMIP
+						LOCAL_ROLE_IS="active"
+						REMOTE_ROLE_IS="passive"
+		;;
+		$STANDBYCOMIP)	REMOTE_FWCOMIP=$FWCOMIP
+						LOCAL_ROLE_IS="passive"
+						REMOTE_ROLE_IS="active"
+		;;
+		*)	logit config error
+			exit 1
+		;;
+	esac
+
+	ssh ${SSH_ARGS} $REMOTE_FWCOMIP "touch ${SWITCH_REQUEST_FILE}" > $TMPFILE 2>&1
+	case $? in
+		0)	logit "created switch request file on $REMOTE_FWCOMIP"
+		;;
+		*)	logit "failed to create switch request file on $REMOTE_FWCOMIP"
+			cat $TMPFILE | logit
+		;;
+	esac
+
+	f_do_switch
+}
+
+function f_do_switch() {
+
+	logit "switch requested"
+
+	# pid|%s time|status msg
+	if [ -f "${RECONFIG_IN_PROGRESS}" ]; then
+		logit "lock file '${RECONFIG_IN_PROGRESS}' found"
+		PID=`awk -F'|'	'{ print $1 }' ${RECONFIG_IN_PROGRESS}`
+		TIME=`awk -F'|'	'{ print $2 }' ${RECONFIG_IN_PROGRESS}`
+		MSG=`awk -F'|'	'{ print $3 }' ${RECONFIG_IN_PROGRESS}`
+		OK=`ps h o pid p $PID | grep ${PID} | wc -l | tr -d ' '`
+		case ${OK} in
+			0)		logit "no process found for $PID, [$MSG] removing lock"
+			;;
+			*)		f_die 1 "found process for $PID [$MSG] stopping"
+			;;
+		esac
+	fi
+
+	/bin/rm -f "${SWITCH_REQUEST_FILE}"
+
+	f_local_is_active
+	if [ $? -eq 1 ]; then
+		ROLE="active"
+	else
+		ROLE="passive"
+	fi
+
+	case $ROLE in
+		active)
+			f_set_role_to passive
+		;;
+		passive)
+			f_set_role_to active
+		;;
+	esac
+}
+
+function f_set_role_to() {
+	#
+	# check calling syntax
+	#
+	case $1 in
+		active|passive)	# ok
+		;;
+		*)	echo "error in cmd line argument: '$1' should be active or passive";
+			exit 1
+		;;
+	esac
+
+	if [ -f "${RECONFIG_IN_PROGRESS}" ]; then
+		OK=`ps h o pid p $PID | grep ${PID} | wc -l | tr -d ' '`
+		case ${OK} in
+			0)		logit "reconfig in progress pid file found for dead pid ($PID), [$MSG] removing lock"
+			;;
+			*)		f_die 1 "reconfig process running on $PID [$MSG] stopping"
+			;;
+		esac
+	fi
+
+	local ALL_IFS=`$ifconfig -a| sed '/Link encap:Ethernet/!d; s/[ ].*//; s/\..*//' | sed '$!N; /^\(.*\)\n\1$/!P; D'`
+
+	case $1 in
+		active)		echo "switch to active ... "
+			#
+			# interface
+			#
+			$ifconfig $COMIF inet $FWCOMIP netmask $COMNETMASK
+			logit "ifconfig $FWCOMIP done, up-ing all interfaces ... "
+			for INTERFACE in $ALL_IFS
+			do
+				$ifconfig $INTERFACE up
+			done
+
+			#
+			# firewall
+			#
+			logit "cpstart - fwm load ... , fw fetch localhost"
+			cpstart					# start the firewall software
+
+								# force reload of rulebase
+			fwm load `$FWDIR/bin/fw stat|awk '$1 == "HOST" { next }; { print $2 }'`
+
+								# if it fails this one hopefully will not:
+			fw fetch localhost			# install rulebase from localhost (allways true on UNIha)
+
+			site_post_f_set_role_to_active	# defined in config file
+
+		;;
+		passive)	logit "switch to passive ... "
+			#
+			# firewall
+			#
+			logit "stopping fireall ..."
+			cpstop
+
+			#
+			# Interface
+			#
+			for INTERFACE in $ALL_IFS
+			do
+				case $INTERFACE in
+				$COMIF)	$ifconfig $INTERFACE inet $STANDBYCOMIP netmask $COMNETMASK
+				;;
+				$INETIF)	: # ignore - we are testing on it
+				;;
+				*)		$ifconfig $INTERFACE down
+				;;
+				esac
+			done
+			site_post_f_set_role_to_passive	# defined in config file
+
+			logit "interfaces configured as passive"
+		;;
+	esac
+
+	echo $1 > ${ROLE_LOCK_FILE}
+	logit "Wrote `cat ${ROLE_LOCK_FILE}` to ${ROLE_LOCK_FILE}"
+}
+
+function f_stat() {
+
+	f_get_info
+
+	#
+	# This is an extented check to see, if ssh keys has been setup correctly
+	# If the hostkeys changes ssh will issue a warning
+	#
+#	logit "extensive test of ssh: active -> passive -> active"
+#	( ssh passive ssh active ssh passive echo "hello world" 2>&1 ) > ${TMPFILE}
+#	case $? in
+#		0)	EXTENTED_SSH_STATUS="ok"
+#			logit "ssh test passwd ok - no error(s) on ssh keys"
+#		;;
+#		*)	EXTENTED_SSH_STATUS="warning"
+#			logit "Error on command:"
+#			cat ${TMPFILE} | logit
+#		;;
+#	esac
+
+	cat << EOF
+
+Active/Passive status:   $STATUS
+Identical configuration: $SYNCSTATUS 
+Last changes to objects: $LOCAL_LAST_CHANGE
+
+Local:
+    Role:                ${LOCAL_ROLE_IS}
+    Interfaces up:       $LOCAL_NUMBER_IFS_UP
+    CP Version:          $LOCAL_CPVERSION
+    Current rulebase:    $LOCAL_RULEBASE
+    Installation date:   $LOCAL_RULEBASE_INSTALLED_ON
+
+Remote:
+    Role:                ${REMOTE_ROLE_IS}
+    Interfaces up:       $REMOTE_NUMBER_IFS_UP
+    CP Version:          $REMOTE_CPVERSION
+    Current rulebase:    $REMOTE_RULEBASE
+    Installation date:   $REMOTE_RULEBASE_INSTALLED_ON
+
+EOF
+
+#	if [ "${EXTENTED_SSH_STATUS}" != "ok" ]; then
+#		echo "Warning with ssh:"
+#		cat ${TMPFILE}
+#		echo "End warning"
+#		echo "One of the hosts may have decided to re-create ssh host keys. This happens if /etc/init.d/sshd is being"
+#		echo "(re)started and the hostkeys are empty or missing - and this may be the case, if it happens in the middle"
+#		echo "of a backup/restore. Please fix."
+#	fi
+#	/bin/rm -f ${TMPFILE}
+	
+}
+
+
+function f_die() {
+	
+	EXIT_STATUS=$1
+	shift
+	$echo "fatal: $*"
+	logit "fatal: $*"
+
+	/bin/rm -f $TMPFILE $SYNCLOCKFILE
+
+	exit $EXIT_STATUS
+
+}
+
+function logit() {
+# purpose     : Timestamp output
+# arguments   : Line og stream
+# return value: None
+# see also    : Take care NOT to pass an empty string to logit!
+	LOGIT_NOW="`/bin/date '+%H:%M:%S (%d/%m)'`"
+	STRING="$*"
+
+	if [ -n "${STRING}" ]; then
+		$echo "${LOGIT_NOW} ${STRING}" >> ${MY_LOGFILE}
+		if [ "${VERBOSE}" = "TRUE" ]; then
+			$echo "${LOGIT_NOW} ${STRING}"
+		fi
+	else
+		while read LINE
+		do
+			if [ -n "${LINE}" ]; then
+				$echo "${LOGIT_NOW} ${LINE}" >> ${MY_LOGFILE}
+				if [ "${VERBOSE}" = "TRUE" ]; then
+					$echo "${LOGIT_NOW} ${LINE}"
+				fi
+			else
+				$echo "" >> ${MY_LOGFILE}
+			fi
+		done
+	fi
+}
+
+usage() {
+# purpose     : Script usage
+# arguments   : none
+# return value: none
+# see also    :
+echo $*
+cat << EOF
+	Usage:
+		`basename $0` option argument
+
+	Options:
+		-v: 	be verbose
+
+	Arguments:
+		Both active and passive:............stat, role, prob, switch and set
+
+		Arguments valid on passive only:....check, prob, switch, update and settime
+
+	stat
+		display status information
+
+	role display role info only
+
+	check
+		check if backup/restore is required
+
+	set <active | passive> 
+		change role
+
+	update [force]
+		backup active, transfer archive, restore on passive, reconfigure IP
+		force: do it even if the configuration seems identical
+
+	prob
+		check if remote wants to switch role
+
+	switch
+		switch role with remote
+
+	settime
+		set NTP time from active
+
+	See man pages for more info.
+
+EOF
+	exit 2
+}
+
+#
+# clean up on trap(s)
+#
+trap 'f_die 1 "trapped - exit now"' 1 2 3 13 15
+
+################################################################################
+# Main
+################################################################################
+
+echo=/bin/echo
+case ${N}$C in
+	"") if $echo "\c" | grep c >/dev/null 2>&1; then
+		N='-n'
+	else
+		C='\c'
+	fi ;;
+esac
+
+#
+# Process arguments
+#
+while getopts hv opt
+do
+case $opt in
+	v)	VERBOSE=TRUE
+		SSH_VERBOSE="-v"
+	;;
+	h)	usage
+		exit
+	;;
+	*)	usage
+		exit
+	;;
+esac
+done
+shift `expr $OPTIND - 1`
+
+f_readconfig || f_die 1 f_readconfig failed
+
+# Housekeeping - prevent log for running full.
+# Use /etc/cpshell/log_rotation.conf (R75.20) ?
+# P.t no - just prevent the logfile from growing
+# more than 10Mb.
+
+if [ -f ${MY_LOGFILE} ]; then
+	SIZE=`du -ks ${MY_LOGFILE} | awk '{ print $1 }'`
+	if [ ${SIZE} -gt 10256 ]; then
+		/bin/mv ${MY_LOGFILE} ${MY_LOGFILE}.old		# keep only one generation
+		logit "logfile rotated - size: ${SIZE} kb, max size 10Mb"
+	fi
+fi
+
+# CP Environment
+if [ -f /etc/profile.d/CP.sh ]; then
+	. /etc/profile.d/CP.sh
+	logit "sourced /etc/profile.d/CP.sh"
+else
+	# Source global definitions
+	if [ -f /etc/bashrc ]; then
+		logit "sourced /etc/bashrc"
+		. /etc/bashrc
+	fi
+fi
+
+case $FWDIR in
+	"")	logit "empty \$FWDIR=$FWDIR"
+	;;
+	*)	logit "FWDIR=$FWDIR ok"
+	;;
+esac
+
+case $CPDIR in
+	"")	logit "empty \$CPDIR=$CPDIR"
+	;;
+	*)	logit "CPDIR=$CPDIR ok"
+	;;
+esac
+
+case $1 in
+	stat)		f_stat
+	;;
+	role)		f_local_is_active
+				if [ $? -eq 1 ]; then
+					echo "localhost is active"
+				else
+					echo "localhost is passive"
+				fi
+	;;
+	set)		shift; f_set_role_to $*
+	;;
+	check)		f_check
+	;;
+	update)		f_update $*
+	;;
+	settime)	f_settime
+	;;
+	prob)		f_prob
+	;;
+	switch)		f_switch
+	;;
+	*)	usage
+		exit 1
+	;;
+esac
+
+exit 0
+
+__DATA__
+
+exit 0
+
+

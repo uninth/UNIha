@@ -1,0 +1,9 @@
+
+Contact information for the security department at i2.dk:
+====================================================================
+i2 Firewall Support              | e-mail:.........<fwsupport@i2.dk>
+i2, DTU, Bygning 356             | Phone:............+45 35 88 82 88
+DK-2800 Lyngby, Denmark          | WWW:....http://www.i2.dk 
+                                 | WWW:....http://www.dtu.dk
+Key fingerprint = 8BCA C3D2 4FAA C9AF 3CE9  BEB0 2F59 FFD4 1ED9 5416
+====================================================================

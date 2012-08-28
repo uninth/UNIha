@@ -1,0 +1,74 @@
+#!/var/opt/UNItools/bin/bash
+#
+# Loop forever -- without taking any system resources: compared to UNIha
+# this script takes app 1/10 system resources
+#
+# - start by cron - check eg every hour
+# - disabled by reconfig_menu
+# - checks ifstatus every */15 sec
+
+
+
+INTERVAL_TIME=1
+INTERVAL_TIME=10
+
+UNIha=/home/UNIha/bin/UNIha
+MYDIR=/home/UNIha
+
+source /home/UNIha/etc/UNIha.SH
+
+disconnect_client=/home/UNIha/bin/disconnect_client
+ethwireck="/home/UNIha/bin/ethwireck ${INETIF}"
+
+ROLE=`$UNIha role | awk '{ print $NF}'`
+LOCKFILE="/tmp/UNIha.role.lock"								# will go away on reboot
+
+RECONFIG_RUNNING=/tmp/reconfig_menu.running.lock
+RECONFIG_IN_PROGRESS="/tmp/UNIha.reconfig.if.progress"		# reconfig if progress
+SYNCLOCKFILE=${MYDIR}/tmp/UNIha.sync_in_progress
+
+while :;
+do
+	if [ -f $RECONFIG_RUNNING -o -f $RECONFIG_IN_PROGRESS -o -f $SYNCLOCKFILE ]; then
+		echo reconfig_menu running or state locked or sync in progress ...
+		echo "$RECONFIG_RUNNING -o -f $RECONFIG_IN_PROGRESS -o -f $SYNCLOCKFILE"
+	else
+		if [ -f $LOCKFILE ]; then
+			echo state locked
+		else
+			$ethwireck >/dev/null 2>&1			# -1: error 0: up 1: down 2: driver cannot tell
+			LINK=$?
+
+			case ${ROLE} in
+				active)
+					case ${LINK} in
+						0)	echo "active and interface link yes: ok"
+						;;
+						1)	echo "active and interface link no: reconfig as passive"
+						${UNIha} set passive
+						;;
+						2)	echo "unsupported driver"
+							exit 1
+						;;
+					esac
+				;;
+				passive)
+					case ${LINK} in
+						0)	echo "passive and interface link yes: reconfig as active"
+						${UNIha} set active
+						;;
+						1)	echo "passive and interface link no: ok"
+						;;
+						2)	echo "unsupported driver"
+							exit 1
+						;;
+					esac
+				;;
+				*)		echo "script error (ROLE): ROLE=$ROLE, LINK=$LINK"
+						exit 1
+				;;
+			esac
+		fi
+	fi
+	sleep ${INTERVAL_TIME}
+done
